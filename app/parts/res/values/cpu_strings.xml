@@ -52,4 +52,7 @@
     <string name="cpu_apply_temporary_summary">Frequency locking is unavailable in this kernel. Android can replace a temporary range.</string>
     <string name="cpu_verified">Change applied and verified.</string>
     <string name="cpu_restore_action">Restore</string>
+    <string name="cpu_governor_title">CPU governor</string>
+    <string name="cpu_governor_dialog_title">Select CPU governor</string>
+    <string name="cpu_error_governor">The kernel no longer advertises that governor.</string>
 </resources>
