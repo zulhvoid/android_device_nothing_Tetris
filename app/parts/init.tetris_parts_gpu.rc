@@ -9,3 +9,11 @@ on property:vendor.all.modules.ready=1
     chmod 0660 /proc/gpufreqv2/fix_target_opp_index
     chown root system /proc/gpufreqv2/limit_table
     chmod 0660 /proc/gpufreqv2/limit_table
+
+    # MediaTek GED Gaming Boost controls for Tetris Parts
+    chown root system /sys/module/ged/parameters/gx_game_mode
+    chmod 0660 /sys/module/ged/parameters/gx_game_mode
+    chown root system /sys/module/ged/parameters/boost_gpu_enable
+    chmod 0660 /sys/module/ged/parameters/boost_gpu_enable
+    chown root system /sys/module/ged/parameters/enable_gpu_boost
+    chmod 0660 /sys/module/ged/parameters/enable_gpu_boost
