@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DeveloperBoard
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Tune
@@ -22,6 +23,7 @@ import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -52,6 +54,7 @@ import org.lineageos.settings.tetris.ui.PartsPageGutter
 import org.lineageos.settings.tetris.ui.PartsPreference
 import org.lineageos.settings.tetris.ui.PartsPreferenceGroup
 import org.lineageos.settings.tetris.ui.PartsScaffold
+import org.lineageos.settings.tetris.ui.PartsSwitchPreference
 import org.lineageos.settings.tetris.ui.rememberPartsResumed
 
 @Composable
@@ -63,11 +66,13 @@ fun GpuScreen(onBack: () -> Unit) {
     var busy by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<GpuResult?>(null) }
     var editing by remember { mutableStateOf<GpuState?>(null) }
+    var editingFixed by remember { mutableStateOf<GpuState?>(null) }
     var restoreDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(resumed) {
         if (!resumed) {
             editing = null
+            editingFixed = null
             restoreDialog = false
             return@LaunchedEffect
         }
@@ -79,7 +84,6 @@ fun GpuScreen(onBack: () -> Unit) {
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (_: Exception) {
-                    // Do not keep displaying a previous sample as a current GPU reading.
                     state = null
                     readFailed = true
                 }
@@ -168,7 +172,8 @@ fun GpuScreen(onBack: () -> Unit) {
                         title = stringResource(R.string.gpu_requested_range),
                         summary = when (current?.controlMode) {
                             GpuMode.AUTOMATIC -> stringResource(R.string.gpu_mode_automatic)
-                            GpuMode.FIXED -> stringResource(R.string.gpu_mode_fixed)
+                            GpuMode.FIXED -> current.fixedKHz?.let { frequencyText(it) }
+                                ?: stringResource(R.string.gpu_mode_fixed)
                             GpuMode.RANGE -> rangeText(current.requestedMinimumKHz, current.requestedMaximumKHz)
                             else -> unavailable
                         },
@@ -189,10 +194,30 @@ fun GpuScreen(onBack: () -> Unit) {
                         onClick = { editing = current },
                     )
                     PartsPreference(
+                        title = stringResource(R.string.gpu_choose_frequency),
+                        summary = current?.fixedKHz?.let { frequencyText(it) }
+                            ?: stringResource(R.string.gpu_fixed_summary),
+                        icon = Icons.Filled.Lock,
+                        enabled = resumed && !busy && current?.writable == true &&
+                            current.frequenciesKHz.isNotEmpty(),
+                        onClick = { editingFixed = current },
+                    )
+                    PartsSwitchPreference(
+                        title = stringResource(R.string.gpu_ged_boost_title),
+                        summary = stringResource(if (current?.gedBoostEnabled == true) {
+                            R.string.gpu_ged_boost_active
+                        } else R.string.gpu_ged_boost_inactive),
+                        icon = Icons.Filled.Speed,
+                        checked = current?.gedBoostEnabled == true,
+                        enabled = resumed && !busy && current?.gedBoostSupported == true,
+                        onCheckedChange = { enabled ->
+                            runOperation { GpuControlSession.manual { it.setGedBoost(enabled) } }
+                        },
+                    )
+                    PartsPreference(
                         title = stringResource(R.string.gpu_restore_automatic),
                         summary = stringResource(R.string.gpu_restore_summary),
                         icon = Icons.Filled.RestartAlt,
-                        // Recovery stays available independently of the OPP table and fixed mode.
                         enabled = resumed && !busy && current?.canRestore == true,
                         onClick = { restoreDialog = true },
                     )
@@ -251,6 +276,16 @@ fun GpuScreen(onBack: () -> Unit) {
             },
         )
     }
+    editingFixed?.let { gpu ->
+        GpuFixedFrequencyDialog(
+            gpu = gpu,
+            onDismiss = { editingFixed = null },
+            onSelect = { frequency ->
+                editingFixed = null
+                runOperation { GpuControlSession.manual { it.setFixedFrequency(frequency) } }
+            },
+        )
+    }
     if (restoreDialog) {
         AlertDialog(
             onDismissRequest = { restoreDialog = false },
@@ -269,6 +304,51 @@ fun GpuScreen(onBack: () -> Unit) {
             },
         )
     }
+}
+
+@Composable
+private fun GpuFixedFrequencyDialog(
+    gpu: GpuState,
+    onDismiss: () -> Unit,
+    onSelect: (Long) -> Unit,
+) {
+    val frequencies = remember(gpu.frequenciesKHz) { gpu.frequenciesKHz.distinct().sortedDescending() }
+    var selected by remember(frequencies, gpu.fixedKHz) {
+        mutableStateOf(gpu.fixedKHz ?: frequencies.firstOrNull() ?: 0L)
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.gpu_choose_frequency)) },
+        text = {
+            LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                item("summary") {
+                    Text(
+                        text = stringResource(R.string.gpu_fixed_summary),
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(bottom = 12.dp),
+                    )
+                }
+                items(frequencies, key = { it }) { freq ->
+                    PartsPreference(
+                        title = frequencyText(freq),
+                        selected = freq == selected,
+                        onClick = { selected = freq },
+                        trailing = {
+                            RadioButton(selected = freq == selected, onClick = null)
+                        },
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onSelect(selected) }) {
+                Text(stringResource(R.string.gpu_apply_fixed))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(android.R.string.cancel)) }
+        },
+    )
 }
 
 @Composable
