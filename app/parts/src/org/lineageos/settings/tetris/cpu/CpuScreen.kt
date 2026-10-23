@@ -21,8 +21,8 @@ import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -62,6 +62,7 @@ fun CpuScreen(onBack: () -> Unit) {
     var busy by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<String?>(null) }
     var editing by remember { mutableStateOf<CpuPolicyState?>(null) }
+    var editingGovernor by remember { mutableStateOf<CpuPolicyState?>(null) }
     var restoreDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(resumed) {
@@ -82,6 +83,7 @@ fun CpuScreen(onBack: () -> Unit) {
                     null -> R.string.cpu_verified
                     CpuFailure.LOCK_UNSUPPORTED -> R.string.cpu_kernel_required
                     CpuFailure.INVALID_FREQUENCY -> R.string.cpu_error_frequency
+                    CpuFailure.INVALID_GOVERNOR -> R.string.cpu_error_governor
                     CpuFailure.INVALID_RANGE -> R.string.cpu_error_range
                     CpuFailure.LAST_CORE -> R.string.cpu_error_last_core
                     CpuFailure.WRITE_FAILED -> R.string.cpu_error_write
@@ -159,6 +161,13 @@ fun CpuScreen(onBack: () -> Unit) {
                                 onClick = { editing = policy },
                                 enabled = !busy && policy.writable && policy.frequencies.isNotEmpty(),
                             )
+                            PartsPreference(
+                                title = stringResource(R.string.cpu_governor_title),
+                                summary = policy.governor ?: stringResource(R.string.cpu_unavailable),
+                                icon = Icons.Filled.Speed,
+                                onClick = { editingGovernor = policy },
+                                enabled = !busy && policy.governorWritable && policy.availableGovernors.isNotEmpty(),
+                            )
                             PartsSwitchPreference(
                                 title = stringResource(R.string.cpu_force_title),
                                 summary = stringResource(when {
@@ -229,6 +238,16 @@ fun CpuScreen(onBack: () -> Unit) {
             },
         )
     }
+    editingGovernor?.let { policy ->
+        GovernorDialog(
+            policy = policy,
+            onDismiss = { editingGovernor = null },
+            onSelect = { governor ->
+                editingGovernor = null
+                runOperation { it.setGovernor(policy.id, governor) }
+            },
+        )
+    }
     if (restoreDialog) {
         AlertDialog(
             onDismissRequest = { restoreDialog = false },
@@ -247,6 +266,39 @@ fun CpuScreen(onBack: () -> Unit) {
             },
         )
     }
+}
+
+@Composable
+private fun GovernorDialog(
+    policy: CpuPolicyState,
+    onDismiss: () -> Unit,
+    onSelect: (String) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.cpu_governor_dialog_title)) },
+        text = {
+            Column {
+                policy.availableGovernors.forEach { gov ->
+                    PartsPreference(
+                        title = gov,
+                        selected = gov == policy.governor,
+                        onClick = { onSelect(gov) },
+                        trailing = {
+                            RadioButton(
+                                selected = gov == policy.governor,
+                                onClick = null,
+                            )
+                        },
+                    )
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(android.R.string.cancel)) }
+        },
+    )
 }
 
 @Composable
