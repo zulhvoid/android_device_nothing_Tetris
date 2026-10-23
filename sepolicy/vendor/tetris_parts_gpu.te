@@ -24,3 +24,9 @@ allow tetris_parts_app vendor_tetris_gpu_utilization:file { getattr open read };
 # Preserve the pre-existing vendor grants when this one sysfs_ged file is relabelled.
 allow { hal_power_default mtk_hal_power } vendor_tetris_gpu_utilization:file rw_file_perms;
 allow magt vendor_tetris_gpu_utilization:file r_file_perms;
+
+# MediaTek GED gaming boost parameters writable by Parts and Power HAL.
+type vendor_tetris_gpu_ged, fs_type, sysfs_type;
+allow tetris_parts_app vendor_tetris_gpu_ged:file rw_file_perms;
+allow vendor_init vendor_tetris_gpu_ged:file setattr;
+allow { hal_power_default mtk_hal_power } vendor_tetris_gpu_ged:file rw_file_perms;
