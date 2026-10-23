@@ -46,4 +46,7 @@
     <string name="gpu_error_conflict">Another controller changed the GPU settings. Its setting was left unchanged.</string>
     <string name="gpu_effective_summary">Requested limits are your settings. Effective limits are the range currently applied by the driver after combining all controllers.</string>
     <string name="gpu_legacy_fixed_summary">A fixed GPU frequency is active. Applying a range releases fixed mode and lets the GPU scale between the effective limits.</string>
+    <string name="gpu_ged_boost_title">MediaTek GED gaming boost</string>
+    <string name="gpu_ged_boost_active">Enabled · aggressive GPU frame pacing and boost active</string>
+    <string name="gpu_ged_boost_inactive">Disabled · standard system GPU scheduling</string>
 </resources>
