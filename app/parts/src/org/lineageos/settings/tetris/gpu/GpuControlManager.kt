@@ -32,6 +32,8 @@ internal data class GpuState(
     val unavailableReason: GpuFailure?,
     val active: Boolean?,
     val canRestore: Boolean,
+    val gedBoostSupported: Boolean = false,
+    val gedBoostEnabled: Boolean = false,
 )
 
 /** Raw proc values are retained: -1 is an absent constraint, not the lowest/highest OPP. */
@@ -47,15 +49,15 @@ internal data class GpuControlSnapshot(
 )
 
 /**
- * Single-domain MediaTek GPUFREQ v2. Only the DEBUG limiter (1) is written, with OPP
- * indexes from the device's working table. A range remains a dynamic PPM constraint:
- * it does not use fixed-OPP mode, voltages, enable switches, or repeated forcing.
+ * Single-domain MediaTek GPUFREQ v2. Supports both dynamic PPM range limits (DEBUG limiter 1)
+ * and fixed OPP index locking, plus MediaTek GED gaming boost toggles.
  */
 internal class GpuControlManager(
     private val root: File = File("/proc/gpufreqv2"),
     private val writer: (File, String) -> Unit = { file, value -> file.writeText(value) },
     private val pause: (Long) -> Unit = { Thread.sleep(it) },
     private val utilizationFile: File = File("/sys/kernel/ged/hal/gpu_utilization"),
+    private val gedRoot: File = File("/sys/module/ged/parameters"),
 ) {
     private data class Status(
         val currentKHz: Long?, val active: Boolean, val singleDomain: Boolean,
@@ -70,8 +72,6 @@ internal class GpuControlManager(
         val limits: Limits, val ceilingEnabled: Boolean, val floorEnabled: Boolean,
     )
     private data class LimitTable(val debug: Limits, val rows: List<Limiter>) {
-        // Match gpuppm.c::__gpuppm_sort_limit. Compare against the independently reported
-        // effective PPM bounds, so an updated DEBUG cache alone is not a successful readback.
         fun effective(count: Int): Limits? {
             if (count <= 0 || rows.any { row ->
                 listOf(row.limits.ceiling, row.limits.floor).any { it !in -1 until count }
@@ -100,6 +100,11 @@ internal class GpuControlManager(
     private class ConflictFailure : IOException()
     private val fixedControl get() = File(root, "fix_target_opp_index")
     private val rangeControl get() = File(root, "limit_table")
+    private val gedFiles get() = listOf(
+        File(gedRoot, "gx_game_mode"),
+        File(gedRoot, "boost_gpu_enable"),
+        File(gedRoot, "enable_gpu_boost"),
+    )
 
     @Synchronized fun readState(): GpuState = readDriver().state
 
@@ -109,7 +114,6 @@ internal class GpuControlManager(
         }, driver.table.toMap(), if (driver.state.active == true) readUtilization() else null)
     }
 
-    /** One guarded DEBUG ceiling write. Only the coordinator decides who owns this range. */
     @Synchronized fun compareAndSetAdaptive(
         expected: GpuControlSnapshot, target: GpuRawControls,
     ): GpuResult {
@@ -120,7 +124,6 @@ internal class GpuControlManager(
         if (controls == null || !before.state.writable ||
             before.state.controlMode !in listOf(GpuMode.AUTOMATIC, GpuMode.RANGE))
             return GpuResult(before.state.unavailableReason ?: GpuFailure.UNAVAILABLE)
-        // Adaptive work never fixes an OPP, changes the minimum, or normalizes -1 to an endpoint.
         if (target.fixedIndex != -1 || controls.fixedIndex != -1 || target.floorIndex != controls.floorIndex)
             return GpuResult(GpuFailure.INVALID_RANGE)
         if (target.ceilingIndex != -1 && target.ceilingIndex !in before.table)
@@ -133,8 +136,6 @@ internal class GpuControlManager(
     }
 
     private fun readUtilization(): GpuUtilization? = try {
-        // ged_hal.c prints loading, blocked, idle as unsigned percentages. It is
-        // a driver observation without a timestamp/window, not an FPS or jank estimate.
         val text = utilizationFile.readText().trim()
         val values = text.split(Regex("\\s+"))
         if (values.size != 3 || values.any { !it.matches(Regex("[0-9]+")) }) null
@@ -157,10 +158,36 @@ internal class GpuControlManager(
         return apply(Settings(Limits(ceiling, floor), -1), before)
     }
 
+    @Synchronized fun setFixedFrequency(frequencyKHz: Long): GpuResult {
+        val before = readDriver()
+        if (!before.state.writable) {
+            return GpuResult(before.state.unavailableReason ?: GpuFailure.UNAVAILABLE)
+        }
+        val index = before.table.entries.singleOrNull { it.value == frequencyKHz }?.key
+            ?: return GpuResult(GpuFailure.INVALID_FREQUENCY)
+        return apply(Settings(Limits(-1, -1), index), before)
+    }
+
+    @Synchronized fun setGedBoost(enabled: Boolean): GpuResult {
+        val writableFiles = gedFiles.filter { it.exists() && it.canWrite() }
+        if (writableFiles.isEmpty()) return GpuResult(GpuFailure.UNAVAILABLE)
+        val targetValue = if (enabled) "1" else "0"
+        return try {
+            writableFiles.forEach { file -> writer(file, "$targetValue\n") }
+            if (readGedEnabled() != enabled) GpuResult(GpuFailure.READBACK_FAILED)
+            else GpuResult()
+        } catch (_: Exception) {
+            GpuResult(GpuFailure.WRITE_FAILED)
+        }
+    }
+
     @Synchronized fun restoreAutomatic(): GpuResult {
         val before = readDriver()
         if (!before.state.canRestore) {
             return GpuResult(before.state.unavailableReason ?: GpuFailure.UNAVAILABLE)
+        }
+        gedFiles.filter { it.exists() && it.canWrite() }.forEach { file ->
+            runCatching { writer(file, "0\n") }
         }
         return apply(Settings(Limits(-1, -1), -1), before)
     }
@@ -193,8 +220,6 @@ internal class GpuControlManager(
             GpuResult(controlWriteAttempted = controlWriteAttempted)
         } catch (error: Exception) {
             val observed = readDriver()
-            // The proc API has no compare-and-swap. Recheck both manual controls immediately
-            // before every write; never restore a different controller's observed setting.
             val canRollback = observed.supported && observed.settings in owned && observed.state.canRestore &&
                 (guardedTable == null || observed.table == guardedTable)
             val restored = canRollback && rollback(original, observed, before.table, guardedTable)
@@ -254,14 +279,17 @@ internal class GpuControlManager(
 
     private fun awaitApplied(expected: Settings, guardedTable: Map<Int, Long>? = null): Boolean = await { driver ->
         if (!settingsMatch(driver, expected, guardedTable)) return@await false
-        // Clearing our controls does not require an OPP table or claim that other caps vanish.
         if (expected.limits.automatic && expected.fixed == -1) return@await true
         val state = driver.state
         val status = driver.status ?: return@await false
+        if (expected.fixed >= 0) {
+            return@await state.controlMode == GpuMode.FIXED &&
+                (state.active == false || (status.currentIndex == expected.fixed &&
+                    driver.table[status.currentIndex] == state.currentKHz))
+        }
         if (state.controlMode != GpuMode.RANGE || state.effectiveMinimumKHz == null ||
             state.effectiveMaximumKHz == null ||
             driver.expectedEffective != Limits(status.ceiling, status.floor)) return@await false
-        // Effective limits can be tighter than requested, or changed by higher-priority caps.
         state.active == false || (status.currentIndex in status.ceiling..status.floor &&
             driver.table[status.currentIndex] == state.currentKHz)
     }
@@ -273,6 +301,10 @@ internal class GpuControlManager(
         }
         return false
     }
+
+    private fun readGedSupported(): Boolean = gedFiles.any { it.exists() && it.canWrite() }
+    private fun readGedEnabled(): Boolean = gedFiles.filter { it.exists() && it.canRead() }
+        .any { runCatching { it.readText().trim() == "1" }.getOrDefault(false) }
 
     private fun readDriver(): DriverState {
         val firstFixed = read("fix_target_opp_index")?.let(::parseFixedIndex)
@@ -320,6 +352,8 @@ internal class GpuControlManager(
             effectiveMaximumKHz = if (showEffective) table[status!!.ceiling] else null,
             controlMode = mode, readable = status != null, writable = writable,
             unavailableReason = reason, active = status?.active, canRestore = canRestore,
+            gedBoostSupported = readGedSupported(),
+            gedBoostEnabled = readGedEnabled(),
         ), table, settings, status, supported,
             if (firstLimits == lastLimits && tableValid) lastLimits?.effective(table.size) else null)
     }
